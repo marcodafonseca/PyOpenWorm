@@ -1,30 +1,29 @@
 language: python
-
-python:
-  - "2.7"
-
-# command to install dependencies
-# had to split requirements.txt into
-#  TWO files because they install all or none
-#  and dependencies installed later don't know
-#  about dependencies installed earlier in the process
+matrix:
+  include:
+    - python: '3.7'
+      dist: xenial
+      sudo: true
+      env: WORKERS=8
+    - python: '3.6'
+    - python: '3.4'
+    - python: '2.7'
+before_install:
+- pip install --upgrade pip
+- pip install coveralls
+- pip uninstall pytest --yes
+- pip install pytest>=3.4.0
 install:
-  - "pip install coveralls"
-  - "python setup.py install"
-
-
+- python setup.py install
+- pow clone https://github.com/openworm/OpenWormData.git
 script:
-# Old, pre-pytest technique.
-# - "coverage run --source=PyOpenWorm tests/test.py"
-
-# Codespeed, default values for variables that break server
-# - "py.test --cov=PyOpenWorm --code-speed-submit=\"http://pyopenworm.pythonanywhere.com/\" ----environment=\"Dual Core\" --branch=\"default\" -commit=\"0\""
-
-# Codespeed, how it will work once Codespeed is fixed.
-# - "py.test --cov=PyOpenWorm --code-speed-submit=\"http://pyopenworm.pythonanywhere.com/\" ----environment=\"Dual Core\" --branch=\"`git symbolic-ref HEAD | sed -e 's,refs/heads/,,'`\" -commit=\"t rev-parse HEAD`\""
-
-  - "py.test --cov=PyOpenWorm"
-  
-
+- "./ci-test.sh"
+after_script:
+- coveralls
 after_success:
-  - "coveralls"
+- "./codespeed-submit.sh"
+env:
+  global:
+  - secure: Qt0b8NlTnB2FxwdmlXL9/RLcDNA6gUx6+xriipLIZuv+n0rjUmovgqT1UfHGsIUl6pFUXKA8ywPoD2znd3GfigWs/VrB6fXgJiNVNPq1bx1xbX9sPl/6xw5wcVA8nDfFVMj5Q8I5qECaxUwXR83LiKrTCRGewNCRxgGj7aLiYso=
+  - secure: YAH6uIq7iO/ufKMUyN3xpKjDqvrJ2yFXmUi7txYaKfqfN+5fW3H/GbnTFXiRVfmNU52c6PlXtcYzllzkJZY0UTkSqt8amMbHyS52JdLhJwMcch4ddDEd0NllMH7XCmGtfqN0E3EF4yHP4EnXqO/HV1VRmwCDRHHMn8c0rl/iqXc=
+

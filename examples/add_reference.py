@@ -5,34 +5,47 @@ See: "Metadata in PyOpenWorm" for discussion on semantics of what giving
 evidence for an object means.
 """
 
-import sys
+from __future__ import absolute_import
+from __future__ import print_function
 import PyOpenWorm as P
+from PyOpenWorm.evidence import Evidence
+from PyOpenWorm.neuron import Neuron
+from PyOpenWorm.document import Document
+from PyOpenWorm.data import Data
+from PyOpenWorm.context import Context
 
-#Create dummy database configuration.
-d = P.Data({})
+# Create dummy database configuration.
+d = Data()
 
-#Connect to database with dummy configuration
-P.connect(conf=d)
+# Connect to database with dummy configuration
+conn = P.connect(conf=d)
 
-#Create a new Neuron object to work with
-n = P.Neuron(name='AVAL')
+ctx = Context(ident='http://example.org/data', conf=conn.conf)
+evctx = Context(ident='http://example.org/meta', conf=conn.conf)
 
-#Create a new Evidence object with `doi` and `pmid` fields populated.
-#See `PyOpenWorm/evidence.py` for other available fields.
-e = P.Evidence(doi='125.41.3/ploscompbiol', pmid='57182010')
+# Create a new Neuron object to work with
+n = ctx(Neuron)(name='AVAL')
 
-#Evidence object asserts something about the enclosed dataObject.
-#Here we add a receptor to the Neuron we made earlier, and "assert it".
-#As the discussion (see top) reads, this might be asserting the existence of
-#receptor UNC-8 on neuron AVAL.
-e.asserts(n.receptor('UNC-8'))
+# Create a new Evidence object with `doi` and `pmid` fields populated.
+# See `PyOpenWorm/evidence.py` for other available fields.
+d = evctx(Document)(key='Anonymous2011', doi='125.41.3/ploscompbiol', pmid='12345678')
+e = evctx(Evidence)(key='Anonymous2011', reference=d)
 
-#Save the Neuron and Evidence objects to the database.
-n.save()
-e.save()
+# Evidence object asserts something about the enclosed dataObject.
+# Here we add a receptor to the Neuron we made earlier, and "assert it".
+# As the discussion (see top) reads, this might be asserting the existence of
+# receptor UNC-8 on neuron AVAL.
+n.receptor('UNC-8')
 
-#What does my evidence object contain?
-print e
+e.supports(ctx.rdf_object)
 
-#Disconnect from the database.
-P.disconnect()
+# Save the Neuron and Evidence objects to the database.
+ctx.save_context()
+evctx.save_context()
+
+# What does my evidence object contain?
+for e_i in evctx.stored(Evidence)().load():
+    print(e_i.reference(), e_i.supports())
+
+# Disconnect from the database.
+P.disconnect(conn)

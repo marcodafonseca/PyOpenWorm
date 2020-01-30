@@ -1,34 +1,22 @@
-import sys
-sys.path.insert(0,".")
-import unittest
-import neuroml
-import neuroml.writers as writers
-import PyOpenWorm
-from PyOpenWorm import *
-import networkx
-import rdflib
-import rdflib as R
-import pint as Q
-import os
-import subprocess as SP
-import subprocess
-import tempfile
-import doctest
+from __future__ import absolute_import
+from .DataTestTemplate import _DataTest
+from PyOpenWorm.experiment import Experiment
+from PyOpenWorm.document import Document
+from PyOpenWorm.data import DataUser
 
-from glob import glob
-
-from GraphDBInit import * 
-
-from DataTestTemplate import _DataTest
 
 class ExperimentTest(_DataTest):
 
     def test_data_user(self):
         """
         Test that the Experiment object is a DataUser object as well.
-        """ 
-        do = Experiment('', conf=self.config)
+        """
+        do = Experiment(conf=self.config)
         self.assertTrue(isinstance(do, DataUser))
+
+    def test_data_user_reference(self):
+        do = Experiment(reference=Document(conf=self.config), conf=self.config)
+        self.assertIsNotNone(do.reference())
 
     def test_unimplemented_conditions(self):
         """
@@ -38,4 +26,3 @@ class ExperimentTest(_DataTest):
         ex = Experiment()
         with self.assertRaises(NotImplementedError):
             ex.get_conditions()
-

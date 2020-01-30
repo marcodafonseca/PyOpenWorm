@@ -1,8 +1,13 @@
 from __future__ import print_function
-import PyOpenWorm as P
-from .dataObject import DataObject
-from .relationship import Relationship
+from __future__ import absolute_import
+from __future__ import unicode_literals
+
+import six
+
+
+from .biology import BiologyType
 from .cell import Cell
+from .dataObject import DatatypeProperty, ObjectProperty
 
 __all__ = ['Connection']
 
@@ -17,30 +22,31 @@ class Termination:
     Muscle = 'muscle'
 
 
-class Connection(DataObject):
+class Connection(BiologyType):
 
-    """Connection between Cells
+    class_context = BiologyType.class_context
 
-    Parameters
-    ----------
-    pre_cell : string, Muscle or Neuron, optional
-        The pre-synaptic cell
-    post_cell : string, Muscle or Neuron, optional
-        The post-synaptic cell
-    number : int, optional
-        The weight of the connection
-    syntype : {'gapJunction', 'send'}, optional
-        The kind of synaptic connection. 'gapJunction' indicates
-        a gap junction and 'send' a chemical synapse
-    synclass : string, optional
-        The kind of Neurotransmitter (if any) sent between `pre_cell` and `post_cell`
+    post_cell = ObjectProperty(value_type=Cell)
+    ''' The post-synaptic cell '''
 
-    Attributes
-    ----------
-    termination : {'neuron', 'muscle'}
-        Where the connection terminates. Inferred from type of post_cell
-    """
+    pre_cell = ObjectProperty(value_type=Cell)
+    ''' The pre-synaptic cell '''
 
+    number = DatatypeProperty()
+    ''' The weight of the connection '''
+
+    synclass = DatatypeProperty()
+    ''' The kind of Neurotransmitter (if any) sent between `pre_cell` and `post_cell` '''
+
+    syntype = DatatypeProperty()
+    ''' The kind of synaptic connection. 'gapJunction' indicates a gap junction and 'send' a chemical synapse '''
+
+    termination = DatatypeProperty()
+    ''' Where the connection terminates. Inferred from type of post_cell at initialization '''
+
+    key_properties = (pre_cell, post_cell, syntype)
+
+    # Arguments are given explicitly here to support positional arguments
     def __init__(self,
                  pre_cell=None,
                  post_cell=None,
@@ -49,66 +55,39 @@ class Connection(DataObject):
                  synclass=None,
                  termination=None,
                  **kwargs):
-        super(Connection, self).__init__(**kwargs)
+        super(Connection, self).__init__(pre_cell=pre_cell,
+                                         post_cell=post_cell,
+                                         number=number,
+                                         syntype=syntype,
+                                         synclass=synclass,
+                                         **kwargs)
 
-        Connection.ObjectProperty('post_cell', owner=self, value_type=Cell)
-        Connection.ObjectProperty('pre_cell', owner=self, value_type=Cell)
-
-        Connection.DatatypeProperty('number', owner=self)
-        Connection.DatatypeProperty('synclass', owner=self)
-        Connection.DatatypeProperty('syntype', owner=self)
-        Connection.DatatypeProperty('termination', owner=self)
-
-        if isinstance(pre_cell, P.Cell):
-            self.pre_cell(pre_cell)
-        elif pre_cell is not None:
-            # TODO: don't assume that the pre_cell is a neuron
-            self.pre_cell(P.Neuron(name=pre_cell, conf=self.conf))
-
-        if (isinstance(post_cell, P.Cell)):
-            self.post_cell(post_cell)
-        elif post_cell is not None:
-            # TODO: don't assume that the post_cell is a neuron
-            self.post_cell(P.Neuron(name=post_cell, conf=self.conf))
-
-        if isinstance(termination, basestring):
+        if isinstance(termination, six.string_types):
             termination = termination.lower()
             if termination in ('neuron', Termination.Neuron):
                 self.termination(Termination.Neuron)
             elif termination in ('muscle', Termination.Muscle):
                 self.termination(Termination.Muscle)
 
-        if isinstance(number, int):
-            self.number(int(number))
-        elif number is not None:
-            raise Exception(
-                "Connection number must be an int, given %s" %
-                number)
-
-        if isinstance(syntype, basestring):
+        if isinstance(syntype, six.string_types):
             syntype = syntype.lower()
             if syntype in ('send', SynapseType.Chemical):
                 self.syntype(SynapseType.Chemical)
             elif syntype in ('gapjunction', SynapseType.GapJunction):
                 self.syntype(SynapseType.GapJunction)
 
-        if isinstance(synclass, basestring):
-            self.synclass(synclass)
-
-    @property
-    def defined(self):
-        return super(Connection, self).defined or \
-            (self.pre_cell.has_defined_value()
-             and self.post_cell.has_defined_value()
-             and self.syntype.has_defined_value())
-
-    def identifier(self, *args, **kwargs):
-        if super(Connection, self).defined:
-            return super(Connection, self).identifier()
+    def __str__(self):
+        nom = []
+        props = ('pre_cell', 'post_cell', 'syntype', 'termination', 'number', 'synclass',)
+        for p in props:
+            if getattr(self, p).has_defined_value():
+                nom.append((p, getattr(self, p).defined_values[0]))
+        if len(nom) == 0:
+            return super(Connection, self).__str__()
         else:
-            data = (self.pre_cell,
-                    self.post_cell,
-                    self.syntype)
-            data = tuple(x.defined_values[0].identifier().n3() for x in data)
-            data = "".join(data)
-            return self.make_identifier(data)
+            return 'Connection(' + \
+                   ', '.join('{}={}'.format(n[0], n[1]) for n in nom) + \
+                   ')'
+
+
+__yarom_mapped_classes__ = (Connection,)

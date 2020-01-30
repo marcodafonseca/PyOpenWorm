@@ -1,12 +1,13 @@
-import sys
-sys.path.insert(0, ".")
+from __future__ import absolute_import
+from __future__ import print_function
 import PyOpenWorm
 import unittest
 import subprocess
 import tempfile
 
-from PyOpenWorm import Configure
-from GraphDBInit import delete_zodb_data_store, TEST_CONFIG
+from PyOpenWorm.context import Context
+from PyOpenWorm.data import Data
+from .GraphDBInit import delete_zodb_data_store, TEST_CONFIG
 
 
 class _DataTest(unittest.TestCase):
@@ -27,7 +28,7 @@ class _DataTest(unittest.TestCase):
 
     def setUp(self):
         # Set do_logging to True if you like walls of text
-        self.TestConfig = Configure.open(TEST_CONFIG)
+        self.TestConfig = Data.open(TEST_CONFIG)
         td = '__tempdir__'
         z = self.TestConfig['rdf.store_conf']
         if z.startswith(td):
@@ -35,12 +36,24 @@ class _DataTest(unittest.TestCase):
             h = tempfile.mkdtemp()
             self.TestConfig['rdf.store_conf'] = h + x
         self.delete_dir()
-        PyOpenWorm.connect(conf=self.TestConfig, do_logging=False)
+        self.connection = PyOpenWorm.connect(conf=self.TestConfig, do_logging=False)
+        self.context = Context(ident='http://example.org/test-context',
+                               conf=self.TestConfig)
+        typ = type(self)
+        if hasattr(typ, 'ctx_classes'):
+            if isinstance(dict, typ.ctx_classes):
+                self.ctx = self.context(typ.ctx_classes)
+            else:
+                self.ctx = self.context({x.__name__: x for x in typ.ctx_classes})
+
+    def save(self):
+        self.context.save_context()
 
     def tearDown(self):
-        PyOpenWorm.disconnect()
+        PyOpenWorm.disconnect(self.connection)
         self.delete_dir()
 
     @property
     def config(self):
-        return PyOpenWorm.config()
+        return self.TestConfig
+    conf = config

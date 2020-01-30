@@ -1,9 +1,12 @@
-import sys
-sys.path.insert(0, ".")
+from __future__ import absolute_import
 import unittest
 import os
 import subprocess as SP
+import shutil
 import tempfile
+from os.path import join as p
+
+from .TestUtilities import xfail_without_db
 
 
 class ExampleRunnerTest(unittest.TestCase):
@@ -15,18 +18,31 @@ class ExampleRunnerTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(self):
-        os.chdir('examples')
+        self.testdir = tempfile.mkdtemp(prefix=__name__ + '.')
+        shutil.copytree('.pow', p(self.testdir, '.pow'), symlinks=True)
+        shutil.copytree('examples', p(self.testdir, 'examples'), symlinks=True)
+        self.startdir = os.getcwd()
+        os.chdir(p(self.testdir, 'examples'))
+
+    def setUp(self):
+        xfail_without_db()
 
     @classmethod
     def tearDownClass(self):
-        os.chdir('..')
+        os.chdir(self.startdir)
+        shutil.rmtree(self.testdir)
 
     def execfile(self, example_file_name):
         fname = tempfile.mkstemp()[1]
         with open(fname, 'w+') as out:
-            stat = SP.call(["python", example_file_name], stdout=out, stderr=out)
+            stat = SP.call(["python", example_file_name],
+                           stdout=out,
+                           stderr=out)
             out.seek(0)
-            self.assertEqual(0, stat, out.read())
+            self.assertEqual(0, stat,
+                "Example failed with status {}. Its output:\n{}".format(
+                    stat,
+                    out.read()))
         os.unlink(fname)
 
     def test_run_NeuronBasicInfo(self):
@@ -36,7 +52,6 @@ class ExampleRunnerTest(unittest.TestCase):
         # XXX: No `synclass' is given, so all neurons are called `excitatory'
         self.execfile("NetworkInfo.py")
 
-    @unittest.expectedFailure
     def test_run_morpho(self):
         self.execfile("morpho.py")
 
@@ -52,3 +67,6 @@ class ExampleRunnerTest(unittest.TestCase):
     @unittest.skip("See #102")
     def test_rmgr(self):
         self.execfile("rmgr.py")
+
+    def test_extrasyn(self):
+        self.execfile("extrasynaptic_edges.py")

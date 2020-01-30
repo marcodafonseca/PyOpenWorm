@@ -16,12 +16,6 @@ worm.fs*
 six-1.7.3*
 .eggs/*
 .idea/*
-.idea/encodings.xml
-.idea/misc.xml
-.idea/modules.xml
-.idea/PyOpenWorm-OW.iml
-.idea/scopes/scope_settings.xml
-.idea/vcs.xml
 zodb_test_db.fs.tmp
 zodb_test_db.fs
 zodb_test_db.fs.index
@@ -33,8 +27,20 @@ OpenWormData/scripts/worm.db
 examples/*.npy
 examples/cell_indices
 OpenWormData/WormData.n3
+OpenWormData/WormData.n4
 *.ipynb
 *.out
 *.nb
 *.orig
 snakefood
+# I'm not sure what makes .cache, but it isn't human...
+.cache
+.coverage
+.pytest_cache/*
+
+# api docs are generated but housed in the docs/ directory with the handwritten
+# kind
+docs/api
+
+# pow clone'd databases
+.pow/

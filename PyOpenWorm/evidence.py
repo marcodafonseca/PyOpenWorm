@@ -1,439 +1,152 @@
-from PyOpenWorm.pProperty import Property
-from PyOpenWorm.dataObject import DataObject
+import logging
+
+from PyOpenWorm.dataObject import DataObject, ObjectProperty
+from PyOpenWorm.contextDataObject import ContextDataObject
+from PyOpenWorm.context import Context
+
+logger = logging.getLogger(__name__)
+
 
 
 class EvidenceError(Exception):
     pass
 
 
-def _pubmed_uri_to_pmid(uri):
-    from urlparse import urlparse
-    parsed = urlparse(uri)
-    pmid = int(parsed.path.split("/")[2])
-    return pmid
-
-
-def _doi_uri_to_doi(uri):
-    from urlparse import urlparse
-    from urllib2 import unquote
-    parsed = urlparse(uri)
-    doi = parsed.path.split("/")[1]
-    # the doi from a url needs to be decoded
-    doi = unquote(doi)
-    return doi
-
-
-def _url_request(url, headers={}):
-    import urllib2 as U
-    try:
-        r = U.Request(url, headers=headers)
-        s = U.urlopen(r, timeout=1)
-        return s
-    except U.HTTPError:
-        return ""
-    except U.URLError:
-        return ""
-
-
-def _json_request(url):
-    import json
-    headers = {'Content-Type': 'application/json'}
-    try:
-        return json.load(_url_request(url, headers))
-    except BaseException:
-        return {}
-
-
-class AssertsAllAbout(Property):
-    # TODO: Needs tests!
-    multiple = True
-    linkName = "asserts_all_about"
-
-    def __init__(self, **kwargs):
-        Property.__init__(self, 'asserts_all_about', **kwargs)
-
-    @property
-    def values(self):
-        return []
-
-    def set(self, o, **kwargs):
-        """Establish the "asserts" relationship for all of the properties of the given object"""
-        self.owner.asserts(o)
-        for p in o.properties:
-            self.owner.asserts(p)
-
-    def get(self, **kwargs):
-        # traverse the hierarchy of ObjectProperties and return all of the
-        # asserts relationships...
-        ns = {"ow": self.base_namespace,
-              "ns1": self.rdf_namespace,
-              "ev": self.base_namespace["Evidence"] + "/",
-              "ns2": self.base_namespace["SimpleProperty"] + "/"
-              }
-        q = """
-        SELECT ?DataObject ?x ?prop WHERE
-        {
-            ?DataObject rdf:type ow:DataObject .
-            ?DataObject ?x ?DataObject_prop .
-            ?DataObject_prop sp:value ?prop .
-            ?Evidence ev:asserts ?Evidence_asserts .
-            filter (EXISTS { ?DataObject_prop rdf:type ow:Property . })
-        # object
-        # asserts property pattern
-        # general property pattern
-        }
-        """
-
-    def triples(self, **kwargs):
-        # XXX: All triples here are from ``asserts``
-        return []
+class ContextToDataObjectMixin(object):
+    def set(self, value):
+        v = value
+        if isinstance(value, Context):
+            v = value.rdf_object
+        return super(ContextToDataObjectMixin, self).set(v)
 
 
 class Evidence(DataObject):
 
     """
-    A representation of some document which provides evidence like scholarly
-    references, for other objects.
+    A representation which provides evidence, for a group of statements.
 
-    Possible keys include::
+    Attaching evidence to an set of statements is done like this::
 
-        pmid,pubmed: a pubmed id or url (e.g., 24098140)
-        wbid,wormbase: a wormbase id or url (e.g., WBPaper00044287)
-        doi: a Digitial Object id or url (e.g., s00454-010-9273-0)
+       >>> from PyOpenWorm.connection import Connection
+       >>> from PyOpenWorm.evidence import Evidence
+       >>> from PyOpenWorm.context import Context
 
-    Attaching evidence
-    -------------------
-    Attaching evidence to an object is as easy as::
+    Declare contexts::
 
-          e = Evidence(author='White et al.', date='1986')
-          e.asserts(Connection(pre_cell="VA11", post_cell="VD12"))
-          e.save()
+       >>> ACTX = Context(ident="http://example.org/data/some_statements")
+       >>> BCTX = Context(ident="http://example.org/data/some_other_statements")
+       >>> EVCTX = Context(ident="http://example.org/data/some_statements#evidence")
 
-    But what does this series of statements mean? For us it means that White et al.
-    assert that "the cells VA11 and VD12 have a connection".
-    In particular, it says nothing about the neurons themselves.
+    Make statements in `ACTX` and `BCTX` contexts::
 
-    Another example::
+       >>> ACTX(Connection)(pre_cell="VA11", post_cell="VD12", number=3)
+       >>> BCTX(Connection)(pre_cell="VA11", post_cell="VD12", number=2)
 
-          e = Evidence(author='Sulston et al.', date='1983')
-          e.asserts(Neuron(name="AVDL").lineageName("AB alaaapalr"))
-          e.save()
+    In `EVCTX`, state that a that a certain document supports the set of
+    statements in `ACTX`, but refutes the set of statements in `BCTX`::
 
-    This would say that Sulston et al. claimed that neuron AVDL has lineage AB alaaapalr.
+       >>> doc = EVCTX(Document)(author='White et al.', date='1986')
+       >>> EVCTX(Evidence)(reference=doc, supports=ACTX.rdf_object)
+       >>> EVCTX(Evidence)(reference=doc, refutes=BCTX.rdf_object)
 
-    Now a more ambiguous example::
+    Finally, save the contexts::
 
-          e = Evidence(author='Sulston et al.', date='1983')
-          e.asserts(Neuron(name="AVDL"))
-          e.save()
+       >>> ACTX.save_context()
+       >>> BCTX.save_context()
+       >>> EVCTX.save_context()
 
-    What might this mean? There's no clear relationship being discussed as in the
-    previous examples. There are two reasonable semantics for
-    these statements. They could indicate that Sulston et al. assert everything
-    about the AVDL (in this case, only its name). Or they could
-    indicate that Sulston et al. state the existence of AVDL. We will assume the
-    semantics of the latter for *most* objects. The second
-    intention can be expressed as::
+    One note about the `reference` predicate: the reference should, ideally, be
+    an unambiguous link to a peer-reviewed piece of scientific literature
+    detailing methods and data analysis that supports the set of statements.
+    However, in gather data from pre-existing sources, going to that level of
+    specificity may be difficult due to deficient query capability at the data
+    source. In such cases, a broader reference, such as a `Website` with
+    information which guides readers to a peer-reviewed article supporting the
+    statement is sufficient.
 
-          e = Evidence(author='Sulston et al.', date='1983')
-          e.asserts_all_about(Neuron(name="AVDL"))
-          e.save()
+    """
 
-    `asserts_all_about` individually asserts each of the properties of the Neuron
-    including its existence. It does not recursively assert
-    properties of values set on the AVDL Neuron. If, for instance, the Neuron had a
-    *complex object* as the value for its receptor types with
-    information about the receptor's name primary agonist, etc., `asserts_all_about`
-      would say nothing about these. However, `asserts_all` (TODO)::
+    class_context = 'http://openworm.org/schema/sci'
 
-          e.asserts_all(Neuron(name="AVDL",receptor=complex_receptor_object))
+    supports = ObjectProperty(value_type=ContextDataObject,
+                              mixins=(ContextToDataObjectMixin,))
+    '''A context naming a set of statements which are supported by the attached
+       reference'''
 
-    would make the aforementioned recursive statement.
+    refutes = ObjectProperty(value_type=ContextDataObject,
+                             mixins=(ContextToDataObjectMixin,))
+    '''A context naming a set of statements which are refuted by the attached
+       reference'''
 
-    Retrieving evidence
-    -------------------
+    reference = ObjectProperty()
+    '''The resource providing evidence supporting/refuting the attached context'''
 
-    .. Not tested with the latest
+    def defined_augment(self):
+        return ((self.supports.has_defined_value() or
+                 self.refutes.has_defined_value()) and
+                self.reference.has_defined_value())
 
-    Retrieving evidence for an object is trivial as well ::
+    def identifier_augment(self):
+        s = ""
+        if self.supports.has_defined_value:
+            s += self.supports.onedef().identifier.n3()
+        else:
+            s += self.refutes.onedef().identifier.n3()
 
-          e = Evidence()
-          e.asserts(Connection(pre_cell="VA11", post_cell="VD12"))
-          for x in e.load():
-             print x
+        s += self.reference.onedef().identifier.n3()
+        return self.make_identifier(s)
 
-    This would print all of the evidence for the connection between VA11 and VD12
 
-    It's important to note that the considerations of recursive evidence assertions
-    above do not operate for retrieval. Only evidence for the
-    particular object queried (the Connection in the example above), would be
-    returned and not any evidence for anything otherwise about VA11
-    or VD12.
-
-    Attributes
-    ----------
-    asserts : ObjectProperty (value_type=DataObject)
-       When used with an argument, state that this Evidence asserts that the
-       relationship is true.
-
-       Example::
-
-           import bibtex
-           bt = bibtex.parse("my.bib")
-           n1 = Neuron("AVAL")
-           n2 = Neuron("DA3")
-           c = Connection(pre=n1,post=n2,class="synapse")
-           e = Evidence(bibtex=bt['white86'])
-           e.asserts(c)
-
-       Other methods return objects which asserts accepts.
-
-       Example::
-
-           n1 = Neuron("AVAL")
-           r = n1.neighbor("DA3")
-           e = Evidence(bibtex=bt['white86'])
-           e.asserts(r)
-
-       When used without arguments, returns a sequence of statements asserted by
-       this evidence
-
-       Example::
-
-           import bibtex
-           bt = bibtex.parse("my.bib")
-           n1 = Neuron("AVAL")
-           n2 = Neuron("DA3")
-           c = Connection(pre=n1,post=n2,class="synapse")
-           e = Evidence(bibtex=bt['white86'])
-           e.asserts(c)
-           list(e.asserts()) # Returns a list [..., d, ...] such that d==c
-    doi : DatatypeProperty
-        A Digital Object Identifier (DOI) that provides evidence, optional
-    pmid : DatatypeProperty
-        A PubMed ID (PMID) that point to a paper that provides evidence, optional
-    wormbaseid : DatatypeProperty
-        An ID from WormBase that points to a record that provides evidence, optional
-    author : DatatypeProperty
-        The author of the evidence
-    title : DatatypeProperty
-        The title of the evidence
-    year : DatatypeProperty
-        The date (e.g., publication date) of the evidence
-    uri : DatatypeProperty
-        A URL that points to evidence
+def evidence_for(qctx, ctx, evctx=None):
+    """
+     Returns an iterable of Evidence
 
     Parameters
     ----------
-    doi : string
-        A Digital Object Identifier (DOI) that provides evidence, optional
-    pmid : string
-        A PubMed ID (PMID) that point to a paper that provides evidence, optional
-    wormbaseid : string
-        An ID from WormBase that points to a record that provides evidence, optional
-    author : string
-        The author of the evidence
-    title : string
-        The title of the evidence
-    year : string or int
-        The date (e.g., publication date) of the evidence
-    uri : string
-        A URL that points to evidence
-    """
+    qctx : object
+        an object supported by evidence. If the object is a
+        :class:`~PyOpenWorm.context.Context` with no identifier, then the query
+        considers statements 'staged' (rather than stored) in the context
+    ctx : Context
+        Context that bounds where we look for statements about `qctx`. The
+        contexts for statements found in this context are the actual targets of
+        Evidence.supports statements.
+    evctx : Context
+        if the Evidence.supports statements should be looked for somewhere other
+        than `ctx`, that can be specified in evctx. optional
+"""
+    if not evctx:
+        evctx = ctx
+    ctxs = query_context(ctx.rdf_graph(), qctx)
+    ev_objs = []
+    for c in ctxs:
+        ev = evctx(Evidence)()
+        ev.supports(Context(ident=c.identifier).rdf_object)
+        for x in ev.load():
+            ev_objs.append(x)
+    return ev_objs
 
-    def __init__(
-            self,
-            conf=False,
-            author=None,
-            uri=None,
-            year=None,
-            date=None,
-            title=None,
-            doi=None,
-            wbid=None,
-            wormbaseid=None,
-            wormbase=None,
-            bibtex=None,
-            pmid=None,
-            pubmed=None,
-            **kwargs):
-        # The type of the evidence (a paper, a lab, a uri) is
-        # determined by the `source` key
-        # We keep track of a set of fields for the evidence.
-        # Some of the fields are pulled from provided URIs and
-        # some is provided by the user.
-        #
-        # Turns into a star graph
-        #
-        # Evidence field1 value1
-        #        ; field2 value2
-        #        ; field3 value3 .
-        super(Evidence,self).__init__(conf=conf, **kwargs)
-        self._fields = dict()
-        Evidence.ObjectProperty('asserts', multiple=True, owner=self)
-        AssertsAllAbout(owner=self)
-
-        multivalued_fields = ('author', 'uri')
-        other_fields = ('year', 'title', 'doi', 'wbid', 'pmid')
-        self.id_precedence = ('doi', 'pmid', 'wbid', 'uri')
-        for x in multivalued_fields:
-            Evidence.DatatypeProperty(x, multiple=True, owner=self)
-
-        for x in other_fields:
-            Evidence.DatatypeProperty(x, owner=self)
-
-        if pmid is not None:
-            self._fields['pmid'] = pmid
-        elif pubmed is not None:
-            self._fields['pmid'] = pubmed
-
-        if 'pmid' in self._fields:
-            self._pubmed_extract()
-            self.pmid(self._fields['pmid'])
-
-        if wbid is not None:
-            self._fields['wormbase'] = wbid
-        elif wormbase is not None:
-            self._fields['wormbase'] = wormbase
-        elif wormbaseid is not None:
-            self._fields['wormbase'] = wormbaseid
-
-        if 'wormbase' in self._fields:
-            self._wormbase_extract()
-            self.wbid(self._fields['wormbase'])
-
-        if doi is not None:
-            self._fields['doi'] = doi
-            self._crossref_doi_extract()
-            self.doi(doi)
-
-        if bibtex is not None:
-            self._fields['bibtex'] = bibtex
-
-        if year is not None:
-            self.year(year)
-        elif date is not None:
-            self.year(date)
-
-        if title is not None:
-            self.title(title)
-
-        if author is not None:
-            self.author(author)
-
-    def add_data(self, k, v):
-        """ Add a field
-
-        Parameters
-        ----------
-        k : string
-            Field name
-        v : string
-            Field value
-        """
-        self._fields[k] = v
-        dp = Evidence.DatatypeProperty(k, owner=self)
-        dp(v)
-
-    @property
-    def defined(self):
-        if super(Evidence, self).defined:
-            return True
+def query_context(graph, qctx):
+    '''
+    graph : rdflib.graph.Graph
+        Graph where we can find the contexts for statements in `qctx`
+    qctx : PyOpenWorm.context.Context
+        Container for statements
+    '''
+    trips = qctx.contents_triples()
+    lctx = None
+    for t in trips:
+        ctxs = graph.contexts(t)
+        if lctx is None:
+            lctx = frozenset(ctxs)
+            continue
+        if len(lctx) == 0:
+            return frozenset()
         else:
-            for x in self.id_precedence:
-                if getattr(self, x).has_defined_value():
-                    return True
+            lctx = frozenset(ctxs) & lctx
+            if len(lctx) == 0:
+                return lctx
+    return frozenset() if lctx is None else lctx
 
-    def identifier(self):
-        if super(Evidence, self).defined:
-            return super(Evidence, self).identifier()
-        for idKind in self.id_precedence:
-            idprop = getattr(self, idKind)
-            if idprop.has_defined_value():
-                s = str(idKind) + ":" + idprop.defined_values[0].identifier().n3()
-                return self.make_identifier(s)
 
-    # Each 'extract' method should attempt to fill in additional fields given which ones
-    # are already set as well as correct fields that are wrong
-    # TODO: Provide a way to override modification of already set values.
-    def _wormbase_extract(self):
-        # XXX: wormbase's REST API is pretty sparse in terms of data provided.
-        #     Would be better off using AQL or the perl interface
-        # _Very_ few of these have these fields filled in
-        wbid = self._fields['wormbase']
-
-        def wbRequest(ident, field):
-            return _json_request(
-                "http://api.wormbase.org/rest/widget/paper/" +
-                wbid +
-                "/" +
-                field)
-        # get the author
-        j = wbRequest(wbid, 'authors')
-        if 'fields' in j:
-            f = j['fields']
-            if 'data' in f:
-                self.author([x['label'] for x in f['data']])
-            elif 'name' in f:
-                self.author(f['name']['data']['label'])
-
-        # get the publication date
-        j = wbRequest(wbid, 'publication_date')
-        if 'fields' in j:
-            f = j['fields']
-            if 'data' in f:
-                self.year(f['data']['label'])
-            elif 'name' in f:
-                self.year(f['name']['data']['label'])
-
-    def _crossref_doi_extract(self):
-        # Extract data from crossref
-        def crRequest(doi):
-            import urllib as U
-            data = {'q': doi}
-            data_encoded = U.urlencode(data)
-            return _json_request(
-                'http://search.labs.crossref.org/dois?%s' %
-                data_encoded)
-
-        doi = self._fields['doi']
-        if doi[:4] == 'http':
-            doi = _doi_uri_to_doi(doi)
-        r = crRequest(doi)
-        # XXX: I don't think coins is meant to be used, but it has structured
-        # data...
-        if len(r) > 0:
-            extra_data = r[0]['coins'].split('&amp;')
-            fields = (x.split("=") for x in extra_data)
-            fields = [[y.replace('+', ' ').strip() for y in x] for x in fields]
-            authors = [x[1] for x in fields if x[0] == 'rft.au']
-            for a in authors:
-                self.author(a)
-            # no error for bad ids, just an empty list
-            if len(r) > 0:
-                # Crossref can process multiple doi's at one go and return the
-                # metadata. we just need the first one
-                r = r[0]
-                if 'title' in r:
-                    self.title(r['title'])
-                if 'year' in r:
-                    self.year(r['year'])
-
-    def _pubmed_extract(self):
-        def pmRequest(pmid):
-            import xml.etree.ElementTree as ET  # Python 2.5 and up
-            base = 'http://eutils.ncbi.nlm.nih.gov/entrez/eutils/'
-            # XXX: There's more data in esummary.fcgi?, but I don't know how to
-            # parse it
-            url = base + "esummary.fcgi?db=pubmed&id=%d" % pmid
-            return ET.parse(_url_request(url))
-
-        pmid = self._fields['pmid']
-        if pmid[:4] == 'http':
-            # Probably a uri, right?
-            pmid = _pubmed_uri_to_pmid(pmid)
-        pmid = int(pmid)
-        tree = pmRequest(pmid)
-
-        for x in tree.findall('./DocSum/Item[@Name="AuthorList"]/Item'):
-            self.author(x.text)
+__yarom_mapped_classes__ = (Evidence,)

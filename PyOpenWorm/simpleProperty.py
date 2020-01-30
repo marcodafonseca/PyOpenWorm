@@ -1,256 +1,438 @@
 from __future__ import print_function
 
 import rdflib as R
-import random as RND
 import logging
+from six import with_metaclass
 
 from yarom.graphObject import (GraphObject,
                                GraphObjectQuerier,
-                               ComponentTripler)
-from yarom.rdfUtils import deserialize_rdflib_term
+                               ZeroOrMoreTQLayer)
+
+from yarom.mappedProperty import MappedPropertyClass
 from yarom.variable import Variable
 from yarom.propertyValue import PropertyValue
-from yarom.propertyMixins import (ObjectPropertyMixin, DatatypePropertyMixin)
-from PyOpenWorm.data import DataUser
-import hashlib
+from yarom.propertyMixins import (DatatypePropertyMixin,
+                                  UnionPropertyMixin)
+from yarom.mapper import FCN
+from .data import DataUser
+from .contextualize import (Contextualizable, ContextualizableClass,
+                            contextualize_helper,
+                            decontextualize_helper)
+from .context import Context
+from .statement import Statement
+from .inverse_property import InversePropertyMixin
+from .rdf_query_util import goq_hop_scorer, load
+from .rdf_go_modifiers import SubClassModifier
+
+import itertools
+from lazy_object_proxy import Proxy
 
 L = logging.getLogger(__name__)
 
 
-class _values(list):
+class ContextMappedPropertyClass(MappedPropertyClass, ContextualizableClass):
+    def __init__(self, *args, **kwargs):
+        super(ContextMappedPropertyClass, self).__init__(*args, **kwargs)
+        self._cmpc_context = None
 
-    def add(self, v):
-        super(_values, self).append(v)
+    @property
+    def context(self):
+        return object.__getattribute__(self, '_cmpc_context')
+
+    @context.setter
+    def context(self, newc):
+        if self._cmpc_context is not None and self._cmpc_context != newc:
+            raise Exception('Contexts cannot be reassigned for a class')
+        self._cmpc_context = newc
 
 
-class RealSimpleProperty(object):
+class ContextualizedPropertyValue(PropertyValue):
+
+    @property
+    def context(self):
+        return None
+
+
+class _ContextualizableLazyProxy(Proxy, Contextualizable):
+    """ Contextualizes its factory for execution """
+    def contextualize(self, context):
+        assert isinstance(self.__factory__, Contextualizable)
+        self.__factory__ = self.__factory__.contextualize(context)
+        return self
+
+    def __repr__(self):
+        return '{}({})'.format(FCN(type(self)), repr(self.__factory__))
+
+
+class _StatementContextRDFObjectFactory(Contextualizable):
+    __slots__ = ('context', 'statement')
+
+    def __init__(self, statement):
+        self.context = None
+        self.statement = statement
+
+    def contextualize(self, context):
+        temp = _StatementContextRDFObjectFactory(self.statement)
+        temp.context = context
+        return temp
+
+    def __call__(self):
+        if self.context is None:
+            raise ValueError("No context has been set for this proxy")
+        return self.statement.context.contextualize(self.context).rdf_object
+
+    def __repr__(self):
+        return '{}({})'.format(FCN(type(self)), repr(self.statement))
+
+
+class RealSimpleProperty(with_metaclass(ContextMappedPropertyClass,
+                                        DataUser, Contextualizable)):
     multiple = False
     link = R.URIRef("property")
     linkName = "property"
+    base_namespace = R.Namespace("http://openworm.org/entities/")
 
-    def __init__(self, conf, owner):
-        self.conf = conf
-        self._v = _values()
+    def __init__(self, owner, **kwargs):
+        super(RealSimpleProperty, self).__init__(**kwargs)
+        self._v = []
         self.owner = owner
+        self._hdf = dict()
+        self.filling = False
 
-    def hasValue(self):
-        return len(self._v) > 0
+    def contextualize_augment(self, context):
+        self._hdf[context] = None
+        res = contextualize_helper(context, self)
+        if res is not self:
+            cowner = context(res.owner)
+            res.add_attr_override('owner', cowner)
+        return res
+
+    def decontextualize(self):
+        self._hdf[self.context] = None
+        return decontextualize_helper(self)
+
+    def has_value(self):
+        for x in self._v:
+            if x.context == self.context:
+                return True
+        return False
 
     def has_defined_value(self):
+        hdf = self._hdf.get(self.context)
+        if hdf is not None:
+            return hdf
         for x in self._v:
-            if x.defined:
+            if x.context == self.context and x.object.defined:
+                self._hdf[self.context] = True
                 return True
         return False
 
     def set(self, v):
-        if not hasattr(v, "idl"):
-            v = PropertyValue(v)
+        if v is None:
+            raise ValueError('It is not permitted to declare a property to have value the None')
 
-        if self not in v.owner_properties:
-            v.owner_properties.append(self)
+        if not hasattr(v, 'idl'):
+            v = ContextualizedPropertyValue(v)
 
-        if self.multiple:
-            self._v.add(v)
-        else:
-            self._v = _values()
-            self._v.add(v)
+        if not self.multiple:
+            self.clear()
+
+        stmt = self._insert_value(v)
+        if self.context is not None:
+            self.context.add_statement(stmt)
+        return stmt
+
+    def clear(self):
+        """ Clears values set *in all contexts* """
+        self._hdf = dict()
+        for x in self._v:
+            assert self in x.object.owner_properties
+            x.object.owner_properties.remove(self)
+            self._v.remove(x)
 
     @property
     def defined_values(self):
-        return tuple(x for x in self._v if x.defined)
+        return tuple(x.object for x in self._v
+                     if x.object.defined and x.context == self.context)
 
     @property
     def values(self):
-        return self._v
+        return tuple(self._values_helper())
+
+    def _values_helper(self):
+        for x in self._v:
+            if x.context == self.context:
+                # XXX: decontextualzing default context here??
+                if self.context is not None:
+                    yield self.context(x.object)
+                elif isinstance(x.object, Contextualizable):
+                    yield x.object.decontextualize()
+                else:
+                    yield x.object
 
     @property
     def rdf(self):
-        return self.conf['rdf.graph']
+        if self.context is not None:
+            return self.context.rdf_graph()
+        else:
+            return super(RealSimpleProperty, self).rdf
+
+    @property
+    def identifier(self):
+        return self.link
+
+    def fill(self):
+        self.filling = True
+        try:
+            self.clear()
+            for val in self.get():
+                self.set(val)
+                fill = getattr(val, 'fill', True)
+                filling = getattr(val, 'filling', True)
+                if fill and not filling:
+                    fill()
+        finally:
+            self.filling = False
 
     def get(self):
-        v = Variable("var" + str(id(self)))
-        self.set(v)
-        results = GraphObjectQuerier(v, self.rdf)()
-        self.unset(v)
+        if self.rdf is None:
+            return ()
+        results = None
+        owner = self.owner
+        if owner.defined:
+            self._ensure_fresh_po_cache()
+            results = set()
+            for pred, obj in owner.po_cache.cache:
+                if pred == self.link:
+                    results.add(obj)
+        else:
+            v = Variable("var" + str(id(self)))
+            self._insert_value(v)
+
+            def _zomifier(rdf_type):
+                if rdf_type and getattr(self, 'value_rdf_type', None) == rdf_type:
+                    return SubClassModifier(rdf_type)
+            g = ZeroOrMoreTQLayer(_zomifier, self.rdf)
+            results = GraphObjectQuerier(v, g, parallel=False,
+                                         hop_scorer=goq_hop_scorer)()
+            self._remove_value(v)
         return results
 
-    def unset(self, v):
-        self._v.remove(v)
+    def _insert_value(self, v):
+        stmt = Statement(self.owner, self, v, self.context)
+        self._hdf[self.context] = None
+        self._v.append(stmt)
+        if self not in v.owner_properties:
+            v.owner_properties.append(self)
+        return stmt
+
+    def _remove_value(self, v):
+        assert self in v.owner_properties
+        self._hdf[self.context] = None
         v.owner_properties.remove(self)
+        self._v.remove(Statement(self.owner, self, v, self.context))
 
+    def _ensure_fresh_po_cache(self):
+        owner = self.owner
+        ident = owner.identifier
+        graph_index = self.conf.get('rdf.graph.change_counter', None)
 
-class _ValueProperty(RealSimpleProperty):
-
-    def __init__(self, conf, owner_property):
-        super(_ValueProperty, self).__init__(conf, owner_property)
-        self._owner_property = owner_property
-        self.rdf_namespace = R.Namespace(
-            conf['rdf.namespace']["SimpleProperty"] + "/")
-        self.link = self.rdf_namespace["value"]
-
-    @property
-    def multiple(self):
-        return self._owner_property.multiple
-
-    @property
-    def value_rdf_type(self):
-        return self._owner_property.value_rdf_type
-
-    @property
-    def rdf(self):
-        return self._owner_property.rdf
-
-    def __str__(self):
-        return "_ValueProperty(" + str(self._owner_property) + ")"
-
-
-class _ObjectPropertyMixin(ObjectPropertyMixin):
-
-    def set(self, v):
-        from .dataObject import DataObject
-        if not isinstance(v, (SimpleProperty, DataObject, Variable)):
-            raise Exception(
-                "An ObjectProperty only accepts DataObject, SimpleProperty"
-                "or Variable instances. Got a " + str(type(v)) + " aka " +
-                str(type(v).__bases__))
-        return super(ObjectPropertyMixin, self).set(v)
-
-
-class _ObjectVaulueProperty (_ObjectPropertyMixin, _ValueProperty):
-    pass
-
-
-class _DatatypeValueProperty (DatatypePropertyMixin, _ValueProperty):
-    pass
-
-
-class ObjectProperty (_ObjectPropertyMixin, RealSimpleProperty):
-    pass
-
-
-class DatatypeProperty (DatatypePropertyMixin, RealSimpleProperty):
-    pass
-
-
-class SimpleProperty(GraphObject, DataUser):
-
-    """ Adapts a SimpleProperty to the GraphObject interface """
-
-    def __init__(self, owner, resolver, **kwargs):
-        super(SimpleProperty, self).__init__(**kwargs)
-        self.owner = owner
-        self._id = None
-        self._variable = R.Variable("V" + str(RND.random()))
-        if self.property_type == "ObjectProperty":
-            self._pp = _ObjectVaulueProperty(
-                conf=self.conf,
-                owner_property=self,
-                resolver=resolver)
-        else:
-            self._pp = _DatatypeValueProperty(
-                conf=self.conf,
-                owner_property=self,
-                resolver=resolver)
-
-        self.properties.append(self._pp)
-        self._defined_values_cache = None
-        self._defined_values_string_cache = None
-
-    def __repr__(self):
-        return str(self.linkName) + "=`" \
-            + ";".join(str(s) for s in self.defined_values) + "'"
-
-    def __str__(self):
-        return str(self.__class__.__name__) + "(" + str(self.idl.n3()) + ")"
-
-    def __hash__(self):
-        return hash(self.idl)
-
-    def identifier(self, *args, **kwargs):
-        return R.URIRef(self.rdf_namespace[
-                        "a" + hashlib.md5(str(self.owner.identifier()) +
-                                          str(self.linkName) +
-                                          self._defined_values_string)
-                        .hexdigest()])
-
-    def set(self, v):
-        self._pp.set(v)
-        self._defined_values_cache = None
+        if graph_index is None or owner.po_cache is None or owner.po_cache.cache_index != graph_index:
+            owner.po_cache = POCache(graph_index, frozenset(self.rdf.predicate_objects(ident)))
 
     def unset(self, v):
-        self._pp.unset(v)
-
-    def get(self):
-        if self._pp.hasValue():
-            if self.property_type == 'ObjectProperty':
-                return self._pp.values
-            else:
-                return [deserialize_rdflib_term(x.idl) for x in self._pp.values]
-        else:
-            return self._pp.get()
-
-    @property
-    def values(self):
-        return self._pp.values
-
-    @property
-    def _defined_values_string(self):
-        if self._defined_values_string_cache is None:
-            self._defined_values_string_cache = "".join(
-                x.identifier().n3() for x in self.defined_values)
-        return self._defined_values_string_cache
-
-    @property
-    def defined_values(self):
-        if self._defined_values_cache is None:
-            self._defined_values_cache = sorted(self._pp.defined_values)
-        return self._defined_values_cache
-
-    @property
-    def defined(self):
-        return self.owner.defined and self._pp.has_defined_value()
-
-    def variable(self):
-        return self._variable
-
-    def triples(self, *args, **kwargs):
-        return ComponentTripler(self)()
-
-    def hasValue(self):
-        return self._pp.hasValue()
-
-    def has_defined_value(self):
-        return self._pp.has_defined_value()
+        self._remove_value(v)
 
     def __call__(self, *args, **kwargs):
-        """ If arguments are passed to the ``Property``, its ``set`` method
-        is called. Otherwise, the ``get`` method is called. If the ``multiple``
-        member for the ``Property`` is set to ``True``, then a Python set containing
-        the associated values is returned. Otherwise, a single bare value is returned.
-        """
+        return _get_or_set(self, *args, **kwargs)
 
-        if len(args) > 0 or len(kwargs) > 0:
-            self.set(*args, **kwargs)
-            return self
-        else:
-            r = self.get(*args, **kwargs)
-            if self.multiple:
-                return set(r)
-            else:
-                try:
-                    return next(iter(r))
-                except StopIteration:
-                    return None
+    def __repr__(self):
+        fcn = FCN(type(self))
+        return '{}(owner={})'.format(fcn, repr(self.owner))
 
     def one(self):
-        l = list(self.get())
-        if len(l) > 0:
-            return l[0]
-        else:
-            return None
+        return next(iter(self.get()), None)
+
+    def onedef(self):
+        for x in self._v:
+            if x.object.defined and x.context == self.context:
+                return x.object
+        return None
 
     @classmethod
-    def register(cls):
-        cls.rdf_type = cls.conf['rdf.namespace'][cls.__name__]
+    def on_mapper_add_class(cls, mapper):
+        cls.rdf_type = cls.base_namespace[cls.__name__]
         cls.rdf_namespace = R.Namespace(cls.rdf_type + "/")
-        cls.conf['rdf.namespace_manager'].bind(cls.__name__, cls.rdf_namespace)
+        return cls
+
+    @property
+    def defined_statements(self):
+        return tuple(x for x in self._v
+                     if x.object.defined and x.subject.defined)
+
+    @property
+    def statements(self):
+        return self.rdf.quads((self.owner.idl, self.link, None, None))
+
+
+class POCache(tuple):
+
+    """ The predicate-object cache object """
+
+    _map = dict(cache_index=0, cache=1)
+
+    def __new__(cls, cache_index, cache):
+        return super(POCache, cls).__new__(cls, (cache_index, cache))
+
+    def __getattr__(self, n):
+        return self[POCache._map[n]]
+
+
+class _ContextualizingPropertySetMixin(object):
+    def set(self, v):
+        if isinstance(v, _ContextualizableLazyProxy):
+            v = v.contextualize(self.context)
+        return super(_ContextualizingPropertySetMixin, self).set(v)
+
+
+class OPResolver(object):
+
+    def __init__(self, context):
+        self._ctx = context
+
+    def id2ob(self, ident, typ):
+        from .rdf_query_util import oid
+        return oid(ident, typ, self._ctx)
+
+    @property
+    def type_resolver(self):
+        from .dataObject import _Resolver
+        return _Resolver.get_instance().type_resolver
+
+    @property
+    def deserializer(self):
+        from .dataObject import _Resolver
+        return _Resolver.get_instance().deserializer
+
+    @property
+    def base_type(self):
+        from .dataObject import _Resolver
+        return _Resolver.get_instance().base_type
+
+
+class PropertyCountMixin(object):
+    def count(self):
+        return sum(1 for _ in super(PropertyCountMixin, self).get())
+
+
+class ObjectProperty(InversePropertyMixin,
+                     _ContextualizingPropertySetMixin,
+                     PropertyCountMixin,
+                     RealSimpleProperty):
+
+    def __init__(self, resolver=None, *args, **kwargs):
+        super(ObjectProperty, self).__init__(*args, **kwargs)
+
+    def contextualize_augment(self, context):
+        res = super(ObjectProperty, self).contextualize_augment(context)
+        if self is not res:
+            res.add_attr_override('resolver', OPResolver(context))
+        return res
+
+    def set(self, v):
+        if not isinstance(v, GraphObject):
+            raise Exception(
+                "An ObjectProperty only accepts GraphObject instances. Got a " +
+                str(type(v)) + " a.k.a. " +
+                " or ".join(str(x) for x in type(v).__bases__))
+        return super(ObjectProperty, self).set(v)
+
+    def get(self):
+        idents = super(ObjectProperty, self).get()
+        r = load(self.rdf, idents=idents, context=self.context,
+                 target_type=self.value_rdf_type)
+        return itertools.chain(self.defined_values, r)
+
+    @property
+    def statements(self):
+        return itertools.chain(self.defined_statements,
+                               (Statement(self.owner,
+                                          self,
+                                          self.id2ob(x[2]),
+                                          Context(ident=x[3]))
+                                for x in super(ObjectProperty, self).statements))
+
+
+class DatatypeProperty(DatatypePropertyMixin, PropertyCountMixin, RealSimpleProperty):
+
+    def get(self):
+        r = super(DatatypeProperty, self).get()
+        s = set()
+        unhashables = []
+        for x in self.defined_values:
+            val = self.resolver.deserializer(x.idl)
+            try:
+                s.add(val)
+            except TypeError as e:
+                unhashables.append(val)
+                L.info('Unhashable type: %s', e)
+        return itertools.chain(r, s, unhashables)
+
+    def onedef(self):
+        x = super(DatatypeProperty, self).onedef()
+        return self.resolver.deserializer(x.identifier) if x is not None else x
+
+    @property
+    def statements(self):
+        return itertools.chain(self.defined_statements,
+                               (Statement(self.owner,
+                                          self,
+                                          self.resolver.deserializer(x[2]),
+                                          Context(ident=x[3]))
+                                for x in super(DatatypeProperty, self).statements))
+
+
+class UnionProperty(_ContextualizingPropertySetMixin,
+                    InversePropertyMixin,
+                    UnionPropertyMixin,
+                    PropertyCountMixin,
+                    RealSimpleProperty):
+
+    """ A Property that can handle either DataObjects or basic types """
+    def get(self):
+        r = super(UnionProperty, self).get()
+        s = set()
+        for x in self.defined_values:
+            if isinstance(x, R.Literal):
+                s.add(self.resolver.deserializer(x.idl))
+        return itertools.chain(r, s)
+
+
+def _get_or_set(self, *args, **kwargs):
+    """ If arguments are given ``set`` method is called. Otherwise, the ``get``
+    method is called. If the ``multiple`` member is set to ``True``, then a
+    Python set containing the associated values is returned. Otherwise, a
+    single bare value is returned.
+    """
+    # XXX: checking this in advance because I'm paranoid, I guess
+    assert hasattr(self, 'set') and hasattr(self.set, '__call__')
+    assert hasattr(self, 'get') and hasattr(self.get, '__call__')
+    assert hasattr(self, 'multiple')
+
+    if len(args) > 0 or len(kwargs) > 0:
+        return self.set(*args, **kwargs)
+    else:
+        r = self.get(*args, **kwargs)
+        if self.multiple:
+            return set(r)
+        else:
+            return next(iter(r), None)
+
+
+def _property_to_string(self):
+    try:
+        s = str(self.linkName) + "=`" + \
+            ";".join(str(s) for s in self.defined_values) + "'"
+    except AttributeError:
+        s = str(self.linkName) + '(no defined_values)'
+    return s
